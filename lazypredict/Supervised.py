@@ -4,6 +4,7 @@ Supervised Models
 # Author: Shankar Rao Pandala <shankar.pandala@live.com>
 
 import numpy as np
+from multiprocessing import Process, Manager, cpu_count
 import pandas as pd
 from tqdm import tqdm
 import datetime
@@ -28,6 +29,7 @@ import xgboost
 
 # import catboost
 import lightgbm
+
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.precision", 2)
@@ -219,6 +221,75 @@ class LazyClassifier:
         self.random_state = random_state
         self.classifiers = classifiers
 
+    def test(self, name, model, preprocessor, X_train, X_test, y_train, y_test, results):
+            start = time.time()
+            try:
+                if "random_state" in model().get_params().keys():
+                    pipe = Pipeline(
+                        steps=[
+                            ("preprocessor", preprocessor),
+                            ("classifier", model(random_state=self.random_state)),
+                        ]
+                    )
+                else:
+                    pipe = Pipeline(
+                        steps=[("preprocessor", preprocessor), ("classifier", model())]
+                    )
+
+                pipe.fit(X_train, y_train)
+                self.models[name] = pipe
+                y_pred = pipe.predict(X_test)
+                accuracy = accuracy_score(y_test, y_pred, normalize=True)
+                b_accuracy = balanced_accuracy_score(y_test, y_pred)
+                f1 = f1_score(y_test, y_pred, average="weighted")
+                try:
+                    roc_auc = roc_auc_score(y_test, y_pred)
+                except Exception as exception:
+                    roc_auc = None
+                    if self.ignore_warnings is False:
+                        print("ROC AUC couldn't be calculated for " + name)
+                        print(exception)
+                results['names'].append(name)
+                results['Accuracy'].append(accuracy)
+                results['B_Accuracy'].append(b_accuracy)
+                results['ROC_AUC'].append(roc_auc)
+                results['F1'].append(f1)
+                results['TIME'].append(time.time() - start)
+                if self.custom_metric is not None:
+                    custom_metric = self.custom_metric(y_test, y_pred)
+                    results['CUSTOM_METRIC'].append(custom_metric)
+                if self.verbose > 0:
+                    if self.custom_metric is not None:
+                        print(
+                            {
+                                "Model": name,
+                                "Accuracy": accuracy,
+                                "Balanced Accuracy": b_accuracy,
+                                "ROC AUC": roc_auc,
+                                "F1 Score": f1,
+                                self.custom_metric.__name__: custom_metric,
+                                "Time taken": time.time() - start,
+                            }
+                        )
+                    else:
+                        print(
+                            {
+                                "Model": name,
+                                "Accuracy": accuracy,
+                                "Balanced Accuracy": b_accuracy,
+                                "ROC AUC": roc_auc,
+                                "F1 Score": f1,
+                                "Time taken": time.time() - start,
+                            }
+                        )
+                if self.predictions:
+                    results['predictions'][name] = y_pred
+                
+            except Exception as exception:
+                if self.ignore_warnings is False:
+                    print(name + " model failed to execute")
+                    print(exception)
+
     def fit(self, X_train, X_test, y_train, y_test):
         """Fit Classification algorithms to X_train and y_train, predict and score on X_test, y_test.
         Parameters
@@ -242,16 +313,18 @@ class LazyClassifier:
         predictions : Pandas DataFrame
             Returns predictions of all the models in a Pandas DataFrame.
         """
-        Accuracy = []
-        B_Accuracy = []
-        ROC_AUC = []
-        F1 = []
-        names = []
-        TIME = []
-        predictions = {}
+        with Manager() as manager:
+            results = manager.dict()
+            results['Accuracy'] = manager.list()
+            results['B_Accuracy'] = manager.list()
+            results['ROC_AUC'] = manager.list()
+            results['F1'] = manager.list()
+            results['names'] = manager.list()
+            results['TIME'] = manager.list()
+            results['predictions'] = manager.dict()
 
-        if self.custom_metric is not None:
-            CUSTOM_METRIC = []
+            if self.custom_metric is not None:
+                results['CUSTOM_METRIC'] = manager.list()
 
         if isinstance(X_train, np.ndarray):
             X_train = pd.DataFrame(X_train)
@@ -285,94 +358,43 @@ class LazyClassifier:
                 print(exception)
                 print("Invalid Classifier(s)")
 
-        for name, model in tqdm(self.classifiers):
-            start = time.time()
-            try:
-                if "random_state" in model().get_params().keys():
-                    pipe = Pipeline(
-                        steps=[
-                            ("preprocessor", preprocessor),
-                            ("classifier", model(random_state=self.random_state)),
-                        ]
-                    )
-                else:
-                    pipe = Pipeline(
-                        steps=[("preprocessor", preprocessor), ("classifier", model())]
-                    )
+        print("this!!!!!")
+        processes = []
+        
+        print(self.classifiers)
+        print(tqdm(self.classifiers))
 
-                pipe.fit(X_train, y_train)
-                self.models[name] = pipe
-                y_pred = pipe.predict(X_test)
-                accuracy = accuracy_score(y_test, y_pred, normalize=True)
-                b_accuracy = balanced_accuracy_score(y_test, y_pred)
-                f1 = f1_score(y_test, y_pred, average="weighted")
-                try:
-                    roc_auc = roc_auc_score(y_test, y_pred)
-                except Exception as exception:
-                    roc_auc = None
-                    if self.ignore_warnings is False:
-                        print("ROC AUC couldn't be calculated for " + name)
-                        print(exception)
-                names.append(name)
-                Accuracy.append(accuracy)
-                B_Accuracy.append(b_accuracy)
-                ROC_AUC.append(roc_auc)
-                F1.append(f1)
-                TIME.append(time.time() - start)
-                if self.custom_metric is not None:
-                    custom_metric = self.custom_metric(y_test, y_pred)
-                    CUSTOM_METRIC.append(custom_metric)
-                if self.verbose > 0:
-                    if self.custom_metric is not None:
-                        print(
-                            {
-                                "Model": name,
-                                "Accuracy": accuracy,
-                                "Balanced Accuracy": b_accuracy,
-                                "ROC AUC": roc_auc,
-                                "F1 Score": f1,
-                                self.custom_metric.__name__: custom_metric,
-                                "Time taken": time.time() - start,
-                            }
-                        )
-                    else:
-                        print(
-                            {
-                                "Model": name,
-                                "Accuracy": accuracy,
-                                "Balanced Accuracy": b_accuracy,
-                                "ROC AUC": roc_auc,
-                                "F1 Score": f1,
-                                "Time taken": time.time() - start,
-                            }
-                        )
-                if self.predictions:
-                    predictions[name] = y_pred
-            except Exception as exception:
-                if self.ignore_warnings is False:
-                    print(name + " model failed to execute")
-                    print(exception)
+        for name, model in tqdm(self.classifiers):
+             #test
+            process = Process(target=self.test, args=(self, name, model, preprocessor, X_train, X_test, y_train, y_test, results,))
+            processes.append(process)
+            process.start()
+        with open('test.txt', 'w') as out:
+            out.write(str(processes))
+        for process in processes:
+            process.join()
+
         if self.custom_metric is None:
             scores = pd.DataFrame(
                 {
-                    "Model": names,
-                    "Accuracy": Accuracy,
-                    "Balanced Accuracy": B_Accuracy,
-                    "ROC AUC": ROC_AUC,
-                    "F1 Score": F1,
-                    "Time Taken": TIME,
+                    "Model": results['names'],
+                    "Accuracy": results['Accuracy'],
+                    "Balanced Accuracy": results['B_Accuracy'],
+                    "ROC AUC": results['ROC_AUC'],
+                    "F1 Score": results['F1'],
+                    "Time Taken": results['TIME'],
                 }
             )
         else:
             scores = pd.DataFrame(
                 {
-                    "Model": names,
-                    "Accuracy": Accuracy,
-                    "Balanced Accuracy": B_Accuracy,
-                    "ROC AUC": ROC_AUC,
-                    "F1 Score": F1,
-                    self.custom_metric.__name__: CUSTOM_METRIC,
-                    "Time Taken": TIME,
+                    "Model": results['names'],
+                    "Accuracy": results['Accuracy'],
+                    "Balanced Accuracy": results['B_Accuracy'],
+                    "ROC AUC": results['ROC_AUC'],
+                    "F1 Score": results['F1'],
+                    self.custom_metric.__name__: results['CUSTOM_METRIC'],
+                    "Time Taken": results['TIME'],
                 }
             )
         scores = scores.sort_values(by="Balanced Accuracy", ascending=False).set_index(
@@ -380,7 +402,7 @@ class LazyClassifier:
         )
 
         if self.predictions:
-            predictions_df = pd.DataFrame.from_dict(predictions)
+            predictions_df = pd.DataFrame.from_dict(results['predictions'])
         return scores, predictions_df if self.predictions is True else scores
 
     def provide_models(self, X_train, X_test, y_train, y_test):
